@@ -1,0 +1,41 @@
+# Krea 2 LoRA dataset config for musubi-tuner (DGX Spark / GB10)
+# Use with: --dataset_config configs/krea2.toml
+#
+# Resolution tiers: [896, 1024, 1280, 1536]. Each tier is a separate dataset entry with its
+# own cache subdirectory (required by musubi-tuner). batch_size must stay 1 for 1280/1536 on
+# unified memory unless you disable gradient checkpointing (not recommended).
+#
+# 1536px ~= 9k image tokens per sample; peak memory is set by the largest bucket. Pair with
+# gradient_checkpointing + fp8 in configs/krea2_train.toml. To cap peak memory, remove the
+# [[datasets]] block for 1536 (or 1280) and re-run latent / TE caching for the remaining tiers.
+
+[general]
+caption_extension = ".txt"
+batch_size = 1
+enable_bucket = true
+# Do not upscale smaller images inside a tier; keeps token counts predictable per bucket.
+bucket_no_upscale = true
+
+[[datasets]]
+image_directory = "dataset/896"
+cache_directory = "cache/896"
+resolution = 896
+num_repeats = 1
+
+[[datasets]]
+image_directory = "dataset/1024"
+cache_directory = "cache/1024"
+resolution = 1024
+num_repeats = 1
+
+[[datasets]]
+image_directory = "dataset/1280"
+cache_directory = "cache/1280"
+resolution = 1280
+num_repeats = 1
+
+[[datasets]]
+image_directory = "dataset/1536"
+cache_directory = "cache/1536"
+resolution = 1536
+num_repeats = 1

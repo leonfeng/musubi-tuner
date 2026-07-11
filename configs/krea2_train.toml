@@ -41,8 +41,11 @@ fp8_scaled = true
 # Fewer workers = less pinned host memory on unified-memory GB10.
 max_data_loader_n_workers = 1
 persistent_data_loader_workers = false
-max_train_epochs = 16
+max_train_epochs = 8
 save_every_n_epochs = 1
+# Resumable training state (optimizer, scheduler, etc.) saved alongside LoRA weights.
+save_state = true
+save_last_n_epochs_state = 2
 seed = 42
 
 [timestep]

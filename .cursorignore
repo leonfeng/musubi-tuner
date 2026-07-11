@@ -1,0 +1,11 @@
+# Exclude heavy lock/virtualenv artifacts
+.venv/
+.uv/
+build/
+dist/
+
+# Exclude large datasets, models or multimedia in your workspace
+*.pt
+*.safetensors
+*.bin
+docs/

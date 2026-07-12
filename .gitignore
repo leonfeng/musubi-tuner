@@ -19,3 +19,4 @@ cache/
 models/
 output/
 sample_prompts.txt
+logs/

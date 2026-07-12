@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Krea 2 LoRA training launcher tuned for NVIDIA DGX Spark (GB10, 128 GB unified memory).
-#
-# The previous OOM (device 0, ~228 MiB alloc with ~655 MiB free / ~122 GiB total) came from
-# holding the full bf16 DiT plus 1536px activations without gradient checkpointing, while
-# Turbo sample generation blocked block-swap offloading. Settings live in configs/krea2_train.toml.
+# Krea 2 LoRA training launcher tuned for MSI EdgeXpert (NVIDIA GB10, 128 GB unified memory, CUDA 13.0).
 
 set -euo pipefail
 

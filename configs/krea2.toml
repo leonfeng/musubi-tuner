@@ -1,7 +1,9 @@
 # Krea 2 LoRA dataset config for musubi-tuner
+# Tuned for MSI EdgeXpert (NVIDIA GB10, 128 GB unified memory, CUDA 13.0)
 # Use with: --dataset_config configs/krea2.toml
 #
-# Single 1024px bucket; enable_bucket resizes/crops images to musubi-tuner buckets.
+# Single 1024px bucket. enable_bucket keeps aspect ratios within the 1024px cap.
+# Speed-first profile: batch_size 1 + no gradient checkpointing (see krea2_train.toml).
 # Re-run krea2_cache_latents.py and krea2_cache_text_encoder_outputs.py after changing layout.
 
 [general]
@@ -14,4 +16,5 @@ bucket_no_upscale = false
 image_directory = "dataset"
 cache_directory = "cache"
 resolution = 1024
+# 153 images × 4 repeats = 612 steps/epoch
 num_repeats = 4

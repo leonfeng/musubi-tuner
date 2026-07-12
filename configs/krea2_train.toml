@@ -1,17 +1,19 @@
-# Krea 2 LoRA training config for musubi-tuner (DGX Spark / GB10, 128 GB unified memory)
+# Krea 2 LoRA training config for musubi-tuner
+# Tuned for MSI EdgeXpert (NVIDIA GB10, 128 GB unified memory, CUDA 13.0)
 # Use with: train_krea2_lora.sh  (or accelerate launch ... --config_file configs/krea2_train.toml)
 #
-# Memory model on DGX Spark:
+# Speed-first profile (single 1024px bucket):
+#   - batch_size 1 + gradient_checkpointing off: fastest per-step training
 #   - fp8_base + fp8_scaled: ~half DiT weight footprint (required pair for K2)
-#   - gradient_checkpointing: essential for 1280/1536px bucket training (stores one block of
-#     activations at a time instead of all 28)
-#   - turbo_dit sampling cannot be combined with blocks_to_swap; fp8 + GC is enough on 128 GB
-#   - turbo_dit uses streaming (not turbo_dit_cache) to avoid a second full DiT in CPU RAM
+#   - compile=true: first epoch builds kernels and uses extra transient memory
 #
 # If you still OOM, try in order:
-#   1. Raise sample_every_n_epochs (e.g. 8) or comment out sample_prompts / turbo_dit / text_encoder
-#   2. Drop the 1536 tier from configs/krea2.toml
-#   3. Remove turbo_dit and add: blocks_to_swap = 8, block_swap_h2d_only = true
+#   1. Set gradient_checkpointing = true (slower but much lower activation memory)
+#   2. Set compile = false (lower peak memory during warmup)
+#   3. Add blocks_to_swap = 8 and block_swap_h2d_only = true under [training]
+#   4. Keep sample generation disabled (turbo_dit + text_encoder commented out below)
+#
+# Throughput-first alternative: batch_size 4 in krea2.toml + gradient_checkpointing = true
 
 dit = "models/raw.safetensors"
 vae = "models/qwen_image_vae.safetensors"
@@ -33,8 +35,7 @@ split_attn = false
 # Compiles the 28 main DiT blocks; first epoch is slower while kernels are built.
 compile = true
 mixed_precision = "bf16"
-# Critical for multi-resolution training up to 1536px (docs default; was false -> OOM).
-gradient_checkpointing = true
+gradient_checkpointing = false
 # Halves DiT weight memory; both flags are required for K2 (see docs/krea2.md).
 fp8_base = true
 fp8_scaled = true
@@ -50,14 +51,15 @@ save_last_n_epochs_state = 2
 seed = 42
 
 [timestep]
-# krea2_shift matches K2's resolution-aware schedule (recommended with bucket training)
-timestep_sampling = "krea2_shift"
+# Fixed 1024px bucket: shift + 2.5 matches K2 inference at 1024×1024 (docs default).
+# krea2_shift is equivalent here but only needed for mixed-resolution training.
+timestep_sampling = "shift"
 weighting_scheme = "none"
-# discrete_flow_shift = 2.5
+discrete_flow_shift = 2.5
 
 [output]
 output_dir = "output"
-output_name = "greg_rutkowski_v4_krea2"
+output_name = "greg_rutkowski_v5_krea2"
 # TensorBoard logs (separate from checkpoints): logs/<prefix><timestamp>/
 # View: tensorboard --logdir logs --bind_all
 logging_dir = "logs"
@@ -65,6 +67,7 @@ log_with = "tensorboard"
 log_prefix = "greg_rutkowski_"
 
 # Sample generation during training (disabled — train only).
+# Enabling turbo_dit raises peak memory; enable gradient_checkpointing first.
 # text_encoder = "models/qwen3vl_4b_bf16.safetensors"
 # turbo_dit = "models/turbo.safetensors"
 # sample_every_n_epochs = 4

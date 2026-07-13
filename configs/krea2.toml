@@ -3,12 +3,12 @@
 # Use with: --dataset_config configs/krea2.toml
 #
 # Single 1024px bucket. enable_bucket keeps aspect ratios within the 1024px cap.
-# Speed-first profile: batch_size 1 + no gradient checkpointing (see krea2_train.toml).
+# batch_size 2 + no gradient checkpointing (see krea2_train.toml).
 # Re-run krea2_cache_latents.py and krea2_cache_text_encoder_outputs.py after changing layout.
 
 [general]
 caption_extension = ".txt"
-batch_size = 1
+batch_size = 2
 enable_bucket = true
 bucket_no_upscale = false
 
@@ -16,5 +16,5 @@ bucket_no_upscale = false
 image_directory = "dataset"
 cache_directory = "cache"
 resolution = 1024
-# 153 images × 4 repeats = 612 steps/epoch
+# 153 images × 4 repeats = 306 steps/epoch at batch_size 2
 num_repeats = 4

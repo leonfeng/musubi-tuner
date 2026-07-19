@@ -402,6 +402,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable_cudnn_backend", action="store_true", help="Disable CUDNN PyTorch backend. May be useful for AMD GPUs."
     )
+    parser.add_argument(
+        "--mask_directory",
+        type=str,
+        default=None,
+        help="directory of grayscale PNG loss masks (basename matches image); embedded in latent cache / 損失マスクPNGのディレクトリ",
+    )
     return parser
 
 

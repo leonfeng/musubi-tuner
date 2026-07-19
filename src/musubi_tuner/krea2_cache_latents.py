@@ -9,6 +9,7 @@ import logging
 from typing import List
 
 import torch
+import torch.nn.functional as F
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -39,8 +40,16 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
     for b, item in enumerate(batch):
         target_latent = latents[b]  # (C, 1, H, W)
+        _, _, lat_h, lat_w = target_latent.shape
+        loss_mask = None
+        if item.use_loss_mask:
+            if item.loss_mask is not None:
+                mask = torch.from_numpy(item.loss_mask).float().unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+                loss_mask = F.interpolate(mask, size=(lat_h, lat_w), mode="area").squeeze(0)  # (1, H, W)
+            else:
+                loss_mask = torch.ones(1, lat_h, lat_w, dtype=torch.float32)
         print(f"Saving cache for item {item.item_key} at {item.latent_cache_path}, latents shape: {target_latent.shape}")
-        save_latent_cache_krea2(item_info=item, latent=target_latent)
+        save_latent_cache_krea2(item_info=item, latent=target_latent, loss_mask=loss_mask)
 
 
 def main():

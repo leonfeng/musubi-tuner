@@ -38,7 +38,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_WAN,
 )
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
-from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
+from musubi_tuner.dataset.media_utils import load_loss_mask_png, resize_image_to_bucket  # explicit import for local use
 
 
 class ItemInfo:
@@ -63,6 +63,10 @@ class ItemInfo:
 
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
+
+        # Optional per-pixel loss mask (H, W) in [0, 1] at bucket resolution; see mask_directory
+        self.loss_mask: Optional[np.ndarray] = None
+        self.use_loss_mask: bool = False
 
         # FramePack architecture specific
         self.fp_latent_window_size: Optional[int] = None
@@ -277,6 +281,7 @@ class ImageDataset(BaseDataset):
         image_directory: Optional[str] = None,
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
+        mask_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
         multiple_target: bool = False,
         fp_latent_window_size: Optional[int] = 9,
@@ -302,6 +307,7 @@ class ImageDataset(BaseDataset):
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
+        self.mask_directory = mask_directory
         self.multiple_target = multiple_target
         self.fp_latent_window_size = fp_latent_window_size
         self.fp_1f_clean_indices = fp_1f_clean_indices
@@ -353,6 +359,8 @@ class ImageDataset(BaseDataset):
             metadata["image_jsonl_file"] = os.path.basename(self.image_jsonl_file)
         if self.control_directory is not None:
             metadata["control_directory"] = os.path.basename(self.control_directory)
+        if self.mask_directory is not None:
+            metadata["mask_directory"] = os.path.basename(self.mask_directory)
         metadata["has_control"] = self.has_control
         return metadata
 
@@ -395,6 +403,11 @@ class ImageDataset(BaseDataset):
                     item_info.fp_1f_clean_indices = self.fp_1f_clean_indices
                     item_info.fp_1f_target_index = self.fp_1f_target_index
                     item_info.fp_1f_no_post = self.fp_1f_no_post
+
+                    if self.mask_directory is not None:
+                        item_info.use_loss_mask = True
+                        bucket_width, bucket_height = bucket_reso[0], bucket_reso[1]
+                        item_info.loss_mask = load_loss_mask_png(item_key, self.mask_directory, (bucket_width, bucket_height))
 
                     if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
                         # we need to split the bucket with latent window size and optional 1f clean indices, zero post

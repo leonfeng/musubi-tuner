@@ -209,6 +209,17 @@ def _add_training_args(parser: argparse.ArgumentParser) -> None:
         help="precision for saving network weights, default: fp32 (the precision network weights are trained in)"
         " / ネットワークの重みを保存する際の精度、省略時はfp32（ネットワークの重みはfp32で学習されるため）",
     )
+    parser.add_argument(
+        "--masked_loss",
+        action="store_true",
+        help="apply per-pixel loss masks from mask_directory (white=train, black=ignore) / mask_directoryのマスクで損失を重み付け",
+    )
+    parser.add_argument(
+        "--mask_directory",
+        type=str,
+        default=None,
+        help="directory of grayscale PNG masks (basename matches image); also used when caching latents / 画像と同名のPNGマスクディレクトリ",
+    )
 
 
 def _add_logging_args(parser: argparse.ArgumentParser) -> None:

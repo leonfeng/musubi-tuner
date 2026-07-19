@@ -47,6 +47,7 @@ class ImageDatasetParams(BaseDatasetParams):
     image_directory: Optional[str] = None
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
+    mask_directory: Optional[str] = None
     multiple_target: Optional[bool] = False
 
     # FramePack dependent parameters
@@ -122,6 +123,7 @@ class ConfigSanitizer:
         "image_jsonl_file": str,
         "cache_directory": str,
         "control_directory": str,
+        "mask_directory": str,
         "multiple_target": bool,
         "fp_latent_window_size": int,
         "fp_1f_clean_indices": [int],

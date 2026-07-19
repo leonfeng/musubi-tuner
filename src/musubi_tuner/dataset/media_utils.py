@@ -98,6 +98,25 @@ def divisible_by(num: int, divisor: int) -> int:
     return num - num % divisor
 
 
+def load_loss_mask_png(image_key: str, mask_directory: str, bucket_reso: tuple[int, int]) -> Optional[np.ndarray]:
+    """Load a grayscale loss mask PNG matching ``image_key`` and resize/crop to ``bucket_reso``.
+
+    White (255) = full loss weight, black (0) = ignore. Returns ``None`` when no mask file exists.
+    """
+    basename = os.path.splitext(os.path.basename(image_key))[0]
+    mask_path = os.path.join(mask_directory, f"{basename}.png")
+    if not os.path.isfile(mask_path):
+        return None
+
+    mask = Image.open(mask_path)
+    if mask.mode != "L":
+        mask = mask.convert("L")
+    mask = resize_image_to_bucket(mask, bucket_reso)
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    return mask.astype(np.float32) / 255.0
+
+
 def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: tuple[int, int]) -> np.ndarray:
     """
     Resize the image to the bucket resolution.

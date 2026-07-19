@@ -93,6 +93,76 @@ class Krea2NetworkTrainer(NetworkTrainer):
             )
         if args.turbo_dit and not args.sample_prompts:
             logger.warning("--turbo_dit is set but --sample_prompts is not; Turbo is only used for sample generation.")
+        if args.masked_loss and not args.mask_directory:
+            raise ValueError("--masked_loss requires --mask_directory (e.g. masks with *.png per image basename).")
+
+    def process_batch(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        vae,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        self._loss_mask = batch.get("loss_mask")
+        try:
+            return super().process_batch(
+                args,
+                accelerator,
+                transformer,
+                network,
+                batch,
+                latents,
+                noise,
+                noise_scheduler,
+                dit_dtype,
+                network_dtype,
+                vae,
+                global_step,
+            )
+        finally:
+            self._loss_mask = None
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        from musubi_tuner.training.trainer_base import compute_loss_weighting_for_sd3
+
+        weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
+        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+        if weighting is not None:
+            loss = loss * weighting
+
+        loss_mask = getattr(self, "_loss_mask", None)
+        if args.masked_loss:
+            if loss_mask is None:
+                raise ValueError(
+                    "masked_loss is enabled but batch has no loss_mask. Re-run krea2_cache_latents.py with mask_directory set."
+                )
+            mask = loss_mask.to(device=loss.device, dtype=loss.dtype)
+            if mask.dim() == 3:
+                mask = mask.unsqueeze(1)  # (B, 1, H, W)
+            while mask.dim() < loss.dim():
+                mask = mask.unsqueeze(1)
+            mask = mask.expand_as(loss)
+            denom = mask.sum().clamp(min=1e-8)
+            return (loss * mask).sum() / denom, {}
+
+        return loss.mean(), {}
 
     def process_sample_prompts(
         self,

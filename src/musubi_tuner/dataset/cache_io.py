@@ -178,18 +178,23 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
-def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
+def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor, loss_mask: Optional[torch.Tensor] = None):
     """Krea 2 (K2) architecture. Single image (F=1), Qwen-Image VAE latents (normalized).
 
     The latent uses the *same* normalization as the Qwen-Image VAE
     (`(raw - mean) / std`), which is exactly what K2's decoder inverts, so the
     Qwen-Image latent caching is reused as-is. No control latent for plain t2i.
+
+    Optional ``loss_mask`` is a (1, H, W) tensor in [0, 1] at latent resolution for masked loss.
     """
     assert latent.dim() == 4, "latent should be 4D tensor (channel, frame, height, width)"
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+    if loss_mask is not None:
+        assert loss_mask.shape[-2:] == (H, W), f"loss_mask spatial dims {loss_mask.shape} != latent {(H, W)}"
+        sd["loss_mask_float32"] = loss_mask.detach().cpu().contiguous().float()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 

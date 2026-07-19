@@ -8,6 +8,7 @@
 #   - cuda_allow_tf32: faster matmuls on GB10
 #   - fp8_base + fp8_scaled: ~half DiT weight footprint (required pair for K2)
 #   - compile=true: first epoch builds kernels and uses extra transient memory
+#   - masked_loss + mask_directory: per-pixel loss weights from masks/*.png (re-cache latents after enabling)
 #
 # If you still OOM, try in order:
 #   1. Set batch_size = 1 in configs/krea2.toml

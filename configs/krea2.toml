@@ -4,7 +4,7 @@
 #
 # Single 1024px bucket. enable_bucket keeps aspect ratios within the 1024px cap.
 # batch_size 2 + no gradient checkpointing (see krea2_train.toml).
-# Re-run krea2_cache_latents.py and krea2_cache_text_encoder_outputs.py after changing layout.
+# Re-run krea2_cache_latents.py and krea2_cache_text_encoder_outputs.py after changing layout or masks.
 
 [general]
 caption_extension = ".txt"
@@ -15,6 +15,7 @@ bucket_no_upscale = false
 [[datasets]]
 image_directory = "dataset"
 cache_directory = "cache"
+mask_directory = "masks"
 resolution = 1024
 # 153 images × 4 repeats = 306 steps/epoch at batch_size 2
 num_repeats = 4

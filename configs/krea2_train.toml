@@ -1,0 +1,87 @@
+# Krea 2 LoRA training config for musubi-tuner
+# Tuned for MSI EdgeXpert (NVIDIA GB10, 128 GB unified memory, CUDA 13.0)
+# Use with: train_krea2_lora.sh  (or accelerate launch ... --config_file configs/krea2_train.toml)
+#
+# Speed-first profile (single 1024px bucket):
+#   - batch_size 2 + gradient_checkpointing off: fewer steps, fast per-step training
+#   - flash_attn: faster attention (GB10 build: TORCH_CUDA_ARCH_LIST=12.0)
+#   - cuda_allow_tf32: faster matmuls on GB10
+#   - fp8_base + fp8_scaled: ~half DiT weight footprint (required pair for K2)
+#   - compile=true: first epoch builds kernels and uses extra transient memory
+#   - masked_loss + mask_directory: per-pixel loss weights from masks/*.png (re-cache latents after enabling)
+#
+# Resume interrupted run: point resume at the latest *-state folder (not the .safetensors file).
+# Leave network_weights unset when resuming — state restores LoRA, optimizer, and scheduler.
+# Keep output_name, seed, and training hyperparams unchanged when resuming.
+#
+#   1. Set batch_size = 1 in configs/krea2.toml
+#   2. Set gradient_checkpointing = true (slower but much lower activation memory)
+#   3. Set compile = false (lower peak memory during warmup)
+#   4. Add blocks_to_swap = 8 and block_swap_h2d_only = true under [training]
+#   5. Keep sample generation disabled (turbo_dit + text_encoder commented out below)
+
+dit = "models/raw.safetensors"
+vae = "models/qwen_image_vae.safetensors"
+dataset_config = "configs/krea2.toml"
+
+[network]
+network_module = "networks.lora_krea2"
+network_dim = 32
+network_alpha = 32
+# Do not set network_weights when using resume below (state already includes the LoRA).
+# network_weights = "output/greg_rutkowski_v5_krea2.safetensors"
+
+[optimizer]
+optimizer_type = "AdamW8bit"
+learning_rate = 1e-4
+max_grad_norm = 1.0
+
+[training]
+flash_attn = true
+split_attn = false
+# White = train, black = ignore. PNG basename must match image (e.g. masks/10050912.png for dataset/10050912.jpg).
+# Re-run krea2_cache_latents.py after changing masks or enabling this (do not use --skip_existing).
+masked_loss = true
+mask_directory = "masks"
+# Compiles the 28 main DiT blocks; first epoch is slower while kernels are built.
+compile = true
+mixed_precision = "bf16"
+cuda_allow_tf32 = true
+gradient_checkpointing = false
+# Halves DiT weight memory; both flags are required for K2 (see docs/krea2.md).
+fp8_base = true
+fp8_scaled = true
+# Fewer workers = less pinned host memory on unified-memory GB10.
+max_data_loader_n_workers = 1
+persistent_data_loader_workers = false
+max_train_epochs = 12
+save_every_n_epochs = 2
+# Resumable training state (optimizer, scheduler, etc.) saved alongside LoRA weights.
+save_state = true
+save_last_n_epochs_state = 2
+# Latest checkpoint after interrupted run at epoch 2 (Jul 19).
+resume = "output/supergiant_games_concept_art_style_v1_kr2-000002-state"
+seed = 42
+
+[timestep]
+# Fixed 1024px bucket: shift + 2.5 matches K2 inference at 1024×1024 (docs default).
+# krea2_shift is equivalent here but only needed for mixed-resolution training.
+timestep_sampling = "shift"
+weighting_scheme = "none"
+discrete_flow_shift = 2.5
+
+[output]
+output_dir = "output"
+output_name = "supergiant_games_concept_art_style_v1_kr2"
+# TensorBoard logs (separate from checkpoints): logs/<prefix><timestamp>/
+# View: tensorboard --logdir logs --bind_all
+logging_dir = "logs"
+log_with = "tensorboard"
+log_prefix = "supergiant_games_"
+
+# Sample generation during training (disabled — train only).
+# Enabling turbo_dit raises peak memory; enable gradient_checkpointing first.
+# text_encoder = "models/qwen3vl_4b_bf16.safetensors"
+# turbo_dit = "models/turbo.safetensors"
+# sample_every_n_epochs = 4
+# sample_prompts = "sample_prompts.txt"

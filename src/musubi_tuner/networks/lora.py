@@ -223,6 +223,225 @@ class LoRAModule(torch.nn.Module):
             return self._match_org_dtype(org_forwarded + torch.cat(lxs, dim=-1) * self.multiplier * scale, org_forwarded)
 
 
+class OrthoTLoRAModule(LoRAModule):
+    """Orthogonal T-LoRA: SVD-initialised Q/P/λ with frozen baseline subtraction.
+
+    Adapter contribution (paper / T-LoRA PEFT)::
+
+        P(Q(dropout(x)) · λ · mask) − P₀(Q₀(dropout(x)) · λ₀ · mask)
+
+    At init the trainable and frozen copies match, so ΔW = 0. ``sig_type`` selects
+    which singular components to keep (``last`` / ``principal`` / ``middle``);
+    ``ortho_init`` chooses the SVD source (``random`` or ``base_layer``).
+
+    Linear-only. Saved checkpoints are distilled back to standard ``lora_down`` /
+    ``lora_up`` Kohya LoRA (see ``distill_state_dict``).
+    """
+
+    def __init__(
+        self,
+        lora_name,
+        org_module: torch.nn.Module,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=1,
+        dropout=None,
+        rank_dropout=None,
+        module_dropout=None,
+        split_dims: Optional[List[int]] = None,
+        sig_type: str = "last",
+        ortho_init: str = "random",
+        **kwargs,
+    ):
+        if split_dims is not None:
+            raise ValueError("Ortho T-LoRA does not support split_dims")
+        if org_module.__class__.__name__ != "Linear":
+            raise ValueError(
+                f"Ortho T-LoRA currently supports Linear only, got {org_module.__class__.__name__}"
+            )
+        sig_type = str(sig_type).strip().lower()
+        if sig_type not in ("last", "principal", "middle"):
+            raise ValueError(f"sig_type must be last|principal|middle, got {sig_type!r}")
+        ortho_init = str(ortho_init).strip().lower()
+        if ortho_init not in ("random", "base_layer"):
+            raise ValueError(f"ortho_init must be random|base_layer, got {ortho_init!r}")
+
+        super().__init__(
+            lora_name,
+            org_module,
+            multiplier=multiplier,
+            lora_dim=lora_dim,
+            alpha=alpha,
+            dropout=dropout,
+            rank_dropout=rank_dropout,
+            module_dropout=module_dropout,
+            split_dims=None,
+        )
+        self.sig_type = sig_type
+        self.ortho_init = ortho_init
+        self._init_ortho_factors(org_module)
+
+    def _pick_components(self, q_src, p_src, s, r):
+        """Select *r* singular components.
+
+        random:      q_src=U (in×in), p_src=Vh (out×out)
+        base_layer:  q_src=Vh (in×in), p_src=U (out×out)
+
+        Returns q_weight (r, in), p_weight (out, r), lambda (1, r).
+        """
+        n_components = min(s.shape[0], q_src.shape[0], p_src.shape[1])
+        r = min(r, n_components)
+
+        if self.sig_type == "principal":
+            q_w = q_src[:r].clone()
+            p_w = p_src[:, :r].clone()
+            lam = s[None, :r].clone()
+        elif self.sig_type == "last":
+            q_w = q_src[-r:].clone()
+            p_w = p_src[:, -r:].clone()
+            lam = s[None, -r:].clone()
+        else:  # middle
+            start = math.ceil((q_src.shape[0] - r) / 2)
+            q_w = q_src[start : start + r].clone()
+            start = math.ceil((p_src.shape[1] - r) / 2)
+            p_w = p_src[:, start : start + r].clone()
+            start = math.ceil((s.shape[0] - r) / 2)
+            lam = s[None, start : start + r].clone()
+        return q_w, p_w, lam
+
+    def _init_ortho_factors(self, org_module: torch.nn.Module) -> None:
+        """SVD-initialise lora_down/up + λ and freeze identical baseline copies."""
+        r = self.lora_dim
+        in_features = org_module.in_features
+        out_features = org_module.out_features
+        target_dtype = self.lora_down.weight.dtype
+        target_device = self.lora_down.weight.device
+
+        svd_device = target_device
+        if svd_device.type == "cpu" and torch.cuda.is_available():
+            svd_device = torch.device("cuda")
+
+        if self.ortho_init == "base_layer":
+            weight = org_module.weight.data.float().to(svd_device)
+            u, s, vh = torch.linalg.svd(weight, full_matrices=True)
+            q_w, p_w, lam = self._pick_components(vh, u, s, r)
+            del u, s, vh, weight
+        else:
+            base_m = torch.normal(
+                mean=0.0,
+                std=1.0 / max(r, 1),
+                size=(in_features, out_features),
+                device=svd_device,
+            )
+            u, s, vh = torch.linalg.svd(base_m, full_matrices=True)
+            q_w, p_w, lam = self._pick_components(u, vh, s, r)
+            del u, s, vh, base_m
+
+        q_w = q_w.to(dtype=target_dtype, device=target_device)
+        p_w = p_w.to(dtype=target_dtype, device=target_device)
+        lam = lam.to(dtype=target_dtype, device=target_device)
+
+        with torch.no_grad():
+            self.lora_down.weight.copy_(q_w)
+            self.lora_up.weight.copy_(p_w)
+
+        self.lora_lambda = nn.Parameter(lam)
+
+        # Frozen baseline copies (identical at init → net contribution is zero).
+        self.base_A = nn.Linear(in_features, r, bias=False)
+        self.base_B = nn.Linear(r, out_features, bias=False)
+        with torch.no_grad():
+            self.base_A.weight.copy_(q_w)
+            self.base_B.weight.copy_(p_w)
+        self.base_A.requires_grad_(False)
+        self.base_B.requires_grad_(False)
+        self.register_buffer("base_lambda", lam.detach().clone(), persistent=True)
+
+        for param in self.parameters():
+            param.data = param.data.contiguous()
+
+    def forward(self, x):
+        org_forwarded = self.org_forward(x)
+
+        if self.module_dropout is not None and self.training:
+            if torch.rand(1) < self.module_dropout:
+                return org_forwarded
+
+        lora_input = self._lora_input(x)
+        if self.dropout is not None and self.training:
+            lora_input = torch.nn.functional.dropout(lora_input, p=self.dropout)
+
+        # Shared T-LoRA mask for trainable and frozen paths. (1, rank) broadcasts
+        # over Linear activations shaped (B, rank) or (B, seq, rank).
+        mask = self._timestep_mask.to(dtype=lora_input.dtype, device=lora_input.device)
+        lam = self.lora_lambda.to(dtype=lora_input.dtype, device=lora_input.device)
+        lam_f = self.base_lambda.to(dtype=lora_input.dtype, device=lora_input.device)
+
+        after_A = self.lora_down(lora_input) * lam * mask
+
+        drop_mask = None
+        if self.rank_dropout is not None and self.training:
+            drop_mask = torch.rand((after_A.size(0), self.lora_dim), device=after_A.device) > self.rank_dropout
+            if after_A.ndim == 3:
+                drop_mask = drop_mask.unsqueeze(1)
+            after_A = after_A * drop_mask
+            scale = self.scale * (1.0 / (1.0 - self.rank_dropout))
+        else:
+            scale = self.scale
+
+        adapter_out = self.lora_up(after_A)
+
+        base_after_A = self.base_A(lora_input) * lam_f * mask
+        if drop_mask is not None:
+            base_after_A = base_after_A * drop_mask
+        base_out = self.base_B(base_after_A)
+
+        delta = (adapter_out - base_out) * self.multiplier * scale
+        return self._match_org_dtype(org_forwarded + delta, org_forwarded)
+
+    def distill_to_lora_weights(self, dtype: Optional[torch.dtype] = None) -> Dict[str, torch.Tensor]:
+        """Project trainable−frozen ΔW back to rank-``lora_dim`` Kohya LoRA weights."""
+        A = self.lora_down.weight.detach().float()  # (r, in)
+        B = self.lora_up.weight.detach().float()  # (out, r)
+        lam = self.lora_lambda.detach().float().reshape(-1)  # (r,)
+
+        Af = self.base_A.weight.detach().float()
+        Bf = self.base_B.weight.detach().float()
+        lamf = self.base_lambda.detach().float().reshape(-1)
+
+        # ΔW = B diag(λ) A − Bf diag(λf) Af, formed via skinny factors (out, 2r) @ (2r, in).
+        M = torch.cat([B * lam.unsqueeze(0), -Bf * lamf.unsqueeze(0)], dim=1)  # (out, 2r)
+        N = torch.cat([A, Af], dim=0)  # (2r, in)
+
+        # Economy SVD via the smaller side.
+        out_f, two_r = M.shape
+        if out_f >= two_r:
+            # SVD(M) then SVD of mid = S Vh N
+            Um, Sm, Vhm = torch.linalg.svd(M, full_matrices=False)
+            mid = (Sm.unsqueeze(1) * Vhm) @ N  # (2r, in)
+            U2, S2, Vh2 = torch.linalg.svd(mid, full_matrices=False)
+            U = Um @ U2
+            S = S2
+            Vh = Vh2
+        else:
+            W = M @ N
+            U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+
+        r = min(self.lora_dim, S.shape[0], U.shape[1], Vh.shape[0])
+        U, S, Vh = U[:, :r], S[:r].clamp(min=0.0), Vh[:r, :]
+        s_sqrt = S.sqrt()
+        lora_up = (U * s_sqrt.unsqueeze(0)).contiguous()
+        lora_down = (s_sqrt.unsqueeze(1) * Vh).contiguous()
+
+        save_dtype = dtype if dtype is not None else self.lora_down.weight.dtype
+        alpha = self.alpha.detach() if isinstance(self.alpha, torch.Tensor) else torch.tensor(float(self.alpha))
+        return {
+            "lora_down.weight": lora_down.to("cpu", dtype=save_dtype),
+            "lora_up.weight": lora_up.to("cpu", dtype=save_dtype),
+            "alpha": alpha.to("cpu", dtype=torch.float32),
+        }
+
+
 class LoRAInfModule(LoRAModule):
     def __init__(
         self,
@@ -477,6 +696,33 @@ def create_network(
     alpha_rank_scale = kwargs.get("alpha_rank_scale", None)
     alpha_rank_scale = float(alpha_rank_scale) if alpha_rank_scale is not None else 1.0
 
+    # Orthogonal T-LoRA (SVD Q/P/λ + frozen baseline). Implies timestep masking.
+    tlora_ortho = kwargs.get("tlora_ortho", None)
+    if tlora_ortho is not None:
+        tlora_ortho = str(tlora_ortho).strip().lower() in ("1", "true", "yes", "on")
+    else:
+        tlora_ortho = False
+    sig_type = kwargs.get("sig_type", "last")
+    sig_type = str(sig_type).strip().lower() if sig_type is not None else "last"
+    ortho_init = kwargs.get("ortho_init", "random")
+    ortho_init = str(ortho_init).strip().lower() if ortho_init is not None else "random"
+
+    if tlora_ortho:
+        if conv_dim is not None:
+            raise ValueError("tlora_ortho does not support conv_dim / Conv LoRA targets")
+        if not use_timestep_mask:
+            logger.info("tlora_ortho=True: enabling use_timestep_mask automatically")
+            use_timestep_mask = True
+        if module_class is None:
+            module_class = OrthoTLoRAModule
+        elif module_class is not OrthoTLoRAModule:
+            raise ValueError(
+                f"tlora_ortho requires OrthoTLoRAModule, got module_class={module_class}"
+            )
+        module_kwargs = dict(module_kwargs or {})
+        module_kwargs["sig_type"] = sig_type
+        module_kwargs["ortho_init"] = ortho_init
+
     # regular expression for module selection: exclude and include
     exclude_patterns = kwargs.get("exclude_patterns", None)
     if exclude_patterns is not None and isinstance(exclude_patterns, str):
@@ -510,6 +756,9 @@ def create_network(
         use_timestep_mask=use_timestep_mask,
         min_rank=min_rank,
         alpha_rank_scale=alpha_rank_scale,
+        tlora_ortho=tlora_ortho,
+        sig_type=sig_type,
+        ortho_init=ortho_init,
     )
 
     loraplus_lr_ratio = kwargs.get("loraplus_lr_ratio", None)
@@ -551,6 +800,9 @@ class LoRANetwork(torch.nn.Module):
         use_timestep_mask: bool = False,
         min_rank: int = 1,
         alpha_rank_scale: float = 1.0,
+        tlora_ortho: bool = False,
+        sig_type: str = "last",
+        ortho_init: str = "random",
     ) -> None:
         super().__init__()
         self.multiplier = multiplier
@@ -568,6 +820,9 @@ class LoRANetwork(torch.nn.Module):
         self.use_timestep_mask = bool(use_timestep_mask)
         self.min_rank = int(min_rank)
         self.alpha_rank_scale = float(alpha_rank_scale)
+        self.tlora_ortho = bool(tlora_ortho)
+        self.sig_type = str(sig_type)
+        self.ortho_init = str(ortho_init)
 
         self.loraplus_lr_ratio = None
         # self.loraplus_unet_lr_ratio = None
@@ -583,6 +838,10 @@ class LoRANetwork(torch.nn.Module):
             if self.use_timestep_mask:
                 logger.info(
                     f"T-LoRA timestep mask enabled: min_rank={self.min_rank}, alpha_rank_scale={self.alpha_rank_scale}"
+                )
+            if self.tlora_ortho:
+                logger.info(
+                    f"Orthogonal T-LoRA enabled: sig_type={self.sig_type}, ortho_init={self.ortho_init}"
                 )
             # if self.conv_lora_dim is not None:
             #     logger.info(
@@ -826,6 +1085,7 @@ class LoRANetwork(torch.nn.Module):
 
     def prepare_optimizer_params(self, unet_lr: float = 1e-4, **kwargs):
         self.requires_grad_(True)
+        self._freeze_ortho_baselines()
 
         all_params = []
         lr_descriptions = []
@@ -834,6 +1094,8 @@ class LoRANetwork(torch.nn.Module):
             param_groups = {"lora": {}, "plus": {}}
             for lora in loras:
                 for name, param in lora.named_parameters():
+                    if not param.requires_grad:
+                        continue
                     if loraplus_ratio is not None and "lora_up" in name:
                         param_groups["plus"][f"{lora.lora_name}.{name}"] = param
                     else:
@@ -878,12 +1140,20 @@ class LoRANetwork(torch.nn.Module):
 
     def prepare_grad_etc(self, unet):
         self.requires_grad_(True)
+        self._freeze_ortho_baselines()
 
     def on_epoch_start(self, unet):
         self.train()
 
     def on_step_start(self):
         pass
+
+    def _freeze_ortho_baselines(self):
+        """Keep Orthogonal T-LoRA frozen copies non-trainable after requires_grad_(True)."""
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if isinstance(lora, OrthoTLoRAModule):
+                lora.base_A.requires_grad_(False)
+                lora.base_B.requires_grad_(False)
 
     def set_timestep_mask(self, timesteps: torch.Tensor, max_timestep: float = 1000.0):
         """Compute and set T-LoRA's timestep-dependent rank mask on all modules.
@@ -942,6 +1212,12 @@ class LoRANetwork(torch.nn.Module):
 
         state_dict = self.state_dict()
 
+        # Orthogonal T-LoRA trains with an extra λ + frozen baseline; distill each
+        # module back to standard Kohya lora_down/lora_up so safetensors load in
+        # ComfyUI / Turbo inference without a special loader.
+        if self.tlora_ortho or any(isinstance(m, OrthoTLoRAModule) for m in self.unet_loras):
+            state_dict = self._distill_ortho_state_dict(state_dict, dtype)
+
         if dtype is not None:
             for key in list(state_dict.keys()):
                 v = state_dict[key]
@@ -962,6 +1238,24 @@ class LoRANetwork(torch.nn.Module):
             save_file(state_dict, file, metadata)
         else:
             torch.save(state_dict, file)
+
+    def _distill_ortho_state_dict(
+        self, state_dict: Dict[str, torch.Tensor], dtype: Optional[torch.dtype]
+    ) -> Dict[str, torch.Tensor]:
+        """Replace OrthoTLoRAModule keys with distilled standard LoRA weights."""
+        distilled = dict(state_dict)
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if not isinstance(lora, OrthoTLoRAModule):
+                continue
+            prefix = lora.lora_name
+            # Drop native ortho keys (trainable + frozen).
+            for key in list(distilled.keys()):
+                if key == prefix or key.startswith(prefix + "."):
+                    distilled.pop(key)
+            weights = lora.distill_to_lora_weights(dtype=dtype)
+            for suffix, tensor in weights.items():
+                distilled[f"{prefix}.{suffix}"] = tensor
+        return distilled
 
     def backup_weights(self):
         # 重みのバックアップを行う
@@ -1010,6 +1304,10 @@ class LoRANetwork(torch.nn.Module):
         state_dict = self.state_dict()
 
         # guard: only supported for LoRA (lora_down/lora_up parameterization)
+        if self.tlora_ortho or any(isinstance(m, OrthoTLoRAModule) for m in self.unet_loras):
+            logger.warning("max_norm_regularization is not supported with Orthogonal T-LoRA")
+            return 0, 0.0, 0.0
+
         if not any("lora_down" in k and "weight" in k for k in state_dict.keys()):
             logger.warning("max_norm_regularization is only supported for LoRA")
             return 0, 0.0, 0.0

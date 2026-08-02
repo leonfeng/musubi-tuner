@@ -172,13 +172,16 @@ If you specify `"verbose=True"`, detailed information of LoRA will be displayed.
 | `use_timestep_mask` | `False` | Enable T-LoRA |
 | `min_rank` | `1` | Minimum effective rank at high noise |
 | `alpha_rank_scale` | `1.0` | Schedule exponent (`frac ** alpha`) |
+| `tlora_ortho` | `False` | Orthogonal T-LoRA (SVD + frozen baseline); enables timestep mask |
+| `sig_type` | `last` | *(ortho)* `last` / `principal` / `middle` |
+| `ortho_init` | `random` | *(ortho)* `random` / `base_layer` |
 
-Works with any architecture that uses `networks.lora` / `networks.lora_*` (including Krea 2). Saved weights are standard Kohya LoRA; sample generation clears the mask automatically. See also [Krea 2 T-LoRA docs](./krea2.md#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク).
+Works with any architecture that uses `networks.lora` / `networks.lora_*` (including Krea 2). Orthogonal checkpoints are distilled to standard Kohya LoRA on save. Sample generation clears the mask automatically. See also [Krea 2 T-LoRA docs](./krea2.md#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク).
 
 <details>
 <summary>日本語</summary>
 
-[T-LoRA](https://arxiv.org/abs/2507.05964) は学習時のみ、LoRAのランクボトルネックにタイムステップ依存のマスクをかけます。高ノイズでは有効ランクが小さくなります。`--network_args` で有効化します。保存される重みは通常のKohya LoRAです。Krea 2向けの詳細は [Krea 2 の T-LoRA 節](./krea2.md#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク) を参照してください。
+[T-LoRA](https://arxiv.org/abs/2507.05964) は学習時のみ、LoRAのランクボトルネックにタイムステップ依存のマスクをかけます。高ノイズでは有効ランクが小さくなります。`--network_args` で有効化します。`tlora_ortho=True` で Orthogonal T-LoRA（SVD + 凍結ベースライン）も利用できます。保存される重みは通常のKohya LoRAです。Krea 2向けの詳細は [Krea 2 の T-LoRA 節](./krea2.md#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク) を参照してください。
 
 </details>
 

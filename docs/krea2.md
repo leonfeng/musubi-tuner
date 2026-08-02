@@ -196,8 +196,19 @@ Enable via `--network_args`:
 | `use_timestep_mask` | `False` | Enable T-LoRA rank masking |
 | `min_rank` | `1` | Floor on effective rank at high noise |
 | `alpha_rank_scale` | `1.0` | Exponent on the rank schedule (`frac ** alpha`); `1.0` is linear |
+| `tlora_ortho` | `False` | Orthogonal T-LoRA (SVD Q/P/λ + frozen baseline); auto-enables `use_timestep_mask` |
+| `sig_type` | `last` | *(ortho)* Singular components: `last` (smallest), `principal`, `middle` |
+| `ortho_init` | `random` | *(ortho)* SVD source: `random` Gaussian or `base_layer` weight |
 
 Recommended starting point for single-image / subject LoRAs on Raw: `use_timestep_mask=True`, `min_rank=1`, keep `network_dim` / `network_alpha` at 32. Sample generation during training (including `--turbo_dit`) uses full rank automatically.
+
+**Orthogonal T-LoRA** (paper variant) initialises adapters from an SVD and subtracts a frozen baseline so ΔW starts at zero; combine with the timestep mask:
+
+```bash
+--network_args "tlora_ortho=True" "sig_type=last" "ortho_init=random" "min_rank=1"
+```
+
+Saved `.safetensors` are distilled to standard Kohya `lora_down` / `lora_up` (ComfyUI / Turbo compatible). Exact mid-run resume of the ortho parameterization uses `--resume` state dirs, not distilled weight files.
 
 <details>
 <summary>日本語</summary>
@@ -205,6 +216,8 @@ Recommended starting point for single-image / subject LoRAs on Raw: `use_timeste
 [T-LoRA](https://arxiv.org/abs/2507.05964) は、拡散タイムステップに応じてLoRAの有効ランクをマスクし、単一画像／少数枚カスタマイズ時の過学習を抑えます。高ノイズでは少ないランク、低ノイズではフルランクを使います。マスクは **学習時のみ** で、保存されるsafetensorsは通常のKohya LoRAのままです（Turbo / ComfyUIでも従来どおり読めます）。
 
 `--network_args` で有効化します。引数の意味は英語版の表を参照。単一画像／被写体LoRAの出発点は `use_timestep_mask=True`、`min_rank=1`、`network_dim`/`network_alpha` 32 です。学習中のサンプル生成（`--turbo_dit` 含む）は自動的にフルランクになります。
+
+**Orthogonal T-LoRA**（論文版）は SVD 初期化 + 凍結ベースライン減算です。`tlora_ortho=True` で有効（タイムステップマスクも自動オン）。保存時は標準 Kohya LoRA に蒸留されます。
 
 </details>
 

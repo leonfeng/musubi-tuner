@@ -265,6 +265,9 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
     ) -> None:
         """Swap to EMA (teacher) weights before sampling when Self-Flow is active."""
+        super().on_before_sample_images(
+            accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+        )
         if not args.self_flow or self.ema_lora_state is None:
             return
         network = accelerator.unwrap_model(network)

@@ -126,6 +126,9 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         sample_parameters,
         dit_dtype,
     ) -> None:
+        super().on_before_sample_images(
+            accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+        )
         if should_use_unconditional_dit_for_lora_sampling(args) and self.unconditional_transformer is None:
             logger.info(f"Loading Ideogram 4 unconditional DiT from {args.unconditional_dit}")
             self.unconditional_transformer = ideogram4_utils.load_ideogram4_transformer(

@@ -304,6 +304,9 @@ class Krea2NetworkTrainer(NetworkTrainer):
             t.data = src[k]
 
     def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype):
+        super().on_before_sample_images(
+            accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+        )
         # Swap RAW -> Turbo base weights for sample generation (LoRA stays hooked and applies on top).
         if not args.turbo_dit:
             return

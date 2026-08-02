@@ -7,6 +7,7 @@
 - [DINOv3 auxiliary perceptual loss](#dinov3-auxiliary-perceptual-loss--dinov3補助知覚loss)
 - [Using configuration files to specify training options](#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)
 - [How to specify `network_args`](#how-to-specify-network_args--network_argsの指定方法)
+- [T-LoRA (timestep-dependent rank masking)](#t-lora-timestep-dependent-rank-masking)
 - [LoRA+](#lora)
 - [Select the target modules of LoRA](#select-the-target-modules-of-lora--loraの対象モジュールを選択する)
 - [Save and view logs in TensorBoard format](#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)
@@ -157,6 +158,29 @@ If you specify `"verbose=True"`, detailed information of LoRA will be displayed.
 ```bash
 --network_args "verbose=True" "key1=value1" "key2=value2" ...
 ```
+
+## T-LoRA (timestep-dependent rank masking)
+
+[T-LoRA](https://arxiv.org/abs/2507.05964) applies a training-only mask on the LoRA rank bottleneck so that high-noise timesteps use fewer rank components. Enable with `--network_args`:
+
+```bash
+--network_args "use_timestep_mask=True" "min_rank=1" "alpha_rank_scale=1.0"
+```
+
+| Arg | Default | Meaning |
+|-----|---------|---------|
+| `use_timestep_mask` | `False` | Enable T-LoRA |
+| `min_rank` | `1` | Minimum effective rank at high noise |
+| `alpha_rank_scale` | `1.0` | Schedule exponent (`frac ** alpha`) |
+
+Works with any architecture that uses `networks.lora` / `networks.lora_*` (including Krea 2). Saved weights are standard Kohya LoRA; sample generation clears the mask automatically. See also [Krea 2 T-LoRA docs](./krea2.md#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク).
+
+<details>
+<summary>日本語</summary>
+
+[T-LoRA](https://arxiv.org/abs/2507.05964) は学習時のみ、LoRAのランクボトルネックにタイムステップ依存のマスクをかけます。高ノイズでは有効ランクが小さくなります。`--network_args` で有効化します。保存される重みは通常のKohya LoRAです。Krea 2向けの詳細は [Krea 2 の T-LoRA 節](./krea2.md#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク) を参照してください。
+
+</details>
 
 ## LoRA+
 

@@ -1171,6 +1171,12 @@ class NetworkTrainer:
             args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
         )
 
+        # T-LoRA: update timestep-dependent rank mask before the DiT forward.
+        # No-op when use_timestep_mask is False / method absent (e.g. LyCORIS).
+        unwrapped_network = accelerator.unwrap_model(network)
+        if hasattr(unwrapped_network, "set_timestep_mask"):
+            unwrapped_network.set_timestep_mask(timesteps)
+
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
@@ -1281,7 +1287,11 @@ class NetworkTrainer:
         The transformer is still wrapped by the accelerator at this point. Use this hook for
         pre-inference setup such as switching auxiliary modules to eval mode or stashing training state.
         """
-        pass
+        # T-LoRA is training-only: restore full-rank masks so sample generation uses
+        # the complete LoRA (matching saved-weight / ComfyUI inference behaviour).
+        unwrapped_network = accelerator.unwrap_model(network)
+        if hasattr(unwrapped_network, "clear_timestep_mask"):
+            unwrapped_network.clear_timestep_mask()
 
     def on_after_sample_images(
         self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype

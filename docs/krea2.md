@@ -136,6 +136,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--text_encoder` is only needed if you generate sample images during training (it is not needed for the training step itself, because text encoder outputs are pre-cached).
 - Krea 2 uses flow matching. `--timestep_sampling shift` with `--discrete_flow_shift` is a reasonable starting point. The value `2.5` matches the K2 inference time-shift at 1024×1024 (the schedule is resolution-aware: it ranges from about `1.6` at 256×256 to `3.2` at 1280×1280, reaching ~`2.5` at 1024×1024). For varying-resolution training, `--timestep_sampling krea2_shift` reproduces the same resolution-aware schedule per sample, so each timestep is shifted exactly as K2 shifts it at inference (default resolution range 256–1280); no fixed `--discrete_flow_shift` is needed in that case. (`--timestep_sampling flux_shift` is similar but its high end saturates at 1024px instead of 1280px, giving a slightly stronger shift above 256px.) The optimal settings are not yet established; feedback is welcome.
 - `--network_dim` / `--network_alpha` of 32 reproduces the model authors' recommended default. See [LoRA target layers](#lora-target-layers--loraの対象レイヤー) below.
+- **T-LoRA** (timestep-dependent rank masking, experimental): pass via `--network_args`, e.g. `"use_timestep_mask=True" "min_rank=1"`. See [T-LoRA](#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク) below.
 
 <details>
 <summary>日本語</summary>
@@ -148,6 +149,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--text_encoder`は学習中にサンプル画像を生成する場合にのみ必要です（テキストエンコーダー出力は事前キャッシュされるため、学習ステップ自体には不要です）。
 - Krea 2はflow matchingを使用します。`--timestep_sampling shift`と`--discrete_flow_shift`の組み合わせが出発点として妥当です。値 `2.5` は1024×1024でのK2推論時のtime-shiftに一致します（このスケジュールは解像度依存で、256×256で約 `1.6`、1280×1280で約 `3.2`、1024×1024で約 `2.5` です）。解像度を変えて学習する場合は、`--timestep_sampling krea2_shift` を使うと同じ解像度依存スケジュールをサンプルごとに再現し、各タイムステップがK2推論時とまったく同じようにシフトされます（デフォルトの解像度レンジ256〜1280）。この場合は固定の `--discrete_flow_shift` は不要です。（`--timestep_sampling flux_shift` も類似ですが、高解像度側が1024px（K2は1280px）で飽和するため、256pxより上ではやや強いshiftになります。）最適な設定はまだ確立されていません。フィードバックをお待ちしています。
 - `--network_dim` / `--network_alpha` を32にすると、モデル作者が推奨するデフォルト設定を再現します。下記の[LoRAの対象レイヤー](#lora-target-layers--loraの対象レイヤー)を参照してください。
+- **T-LoRA**（タイムステップ依存ランクマスク、実験的）: `--network_args` で指定します。例: `"use_timestep_mask=True" "min_rank=1"`。下記の[T-LoRA](#t-lora-timestep-dependent-rank-masking--t-loraタイムステップ依存ランクマスク)を参照してください。
 
 </details>
 
@@ -176,6 +178,33 @@ Because the default already targets everything, both `exclude_patterns` and `inc
 
 - **Attentionのみ**（作者の「長時間学習」設定。rankを上げてattention projectionに集中し、プロンプト追従性を保つ）: コマンドは英語版を参照。per-blockのattention projection（`wq`/`wk`/`wv`/`wo`/`gate`、140 Linear）のみを残します。
 - **任意のサブセット**: `exclude_patterns=['.*']`ですべてを除外し、`include_patterns=[...]`で必要な層を戻します。
+
+</details>
+
+### T-LoRA (timestep-dependent rank masking) / T-LoRA（タイムステップ依存ランクマスク）
+
+[T-LoRA](https://arxiv.org/abs/2507.05964) reduces overfitting on single-image / small-set customization by masking LoRA rank components as a function of the diffusion timestep: high-noise steps use fewer ranks, low-noise steps use full rank. The mask is **training-only**; saved safetensors remain standard Kohya LoRA and load on Turbo / ComfyUI like any other K2 LoRA.
+
+Enable via `--network_args`:
+
+```bash
+--network_args "use_timestep_mask=True" "min_rank=1" "alpha_rank_scale=1.0"
+```
+
+| Arg | Default | Meaning |
+|-----|---------|---------|
+| `use_timestep_mask` | `False` | Enable T-LoRA rank masking |
+| `min_rank` | `1` | Floor on effective rank at high noise |
+| `alpha_rank_scale` | `1.0` | Exponent on the rank schedule (`frac ** alpha`); `1.0` is linear |
+
+Recommended starting point for single-image / subject LoRAs on Raw: `use_timestep_mask=True`, `min_rank=1`, keep `network_dim` / `network_alpha` at 32. Sample generation during training (including `--turbo_dit`) uses full rank automatically.
+
+<details>
+<summary>日本語</summary>
+
+[T-LoRA](https://arxiv.org/abs/2507.05964) は、拡散タイムステップに応じてLoRAの有効ランクをマスクし、単一画像／少数枚カスタマイズ時の過学習を抑えます。高ノイズでは少ないランク、低ノイズではフルランクを使います。マスクは **学習時のみ** で、保存されるsafetensorsは通常のKohya LoRAのままです（Turbo / ComfyUIでも従来どおり読めます）。
+
+`--network_args` で有効化します。引数の意味は英語版の表を参照。単一画像／被写体LoRAの出発点は `use_timestep_mask=True`、`min_rank=1`、`network_dim`/`network_alpha` 32 です。学習中のサンプル生成（`--turbo_dit` 含む）は自動的にフルランクになります。
 
 </details>
 

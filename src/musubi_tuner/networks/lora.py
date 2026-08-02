@@ -101,6 +101,28 @@ class LoRAModule(torch.nn.Module):
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
 
+        # T-LoRA: default all-ones mask so ``lx * mask`` is a no-op until
+        # LoRANetwork.set_timestep_mask rebinds / updates it. persistent=False
+        # keeps the training-only buffer out of saved state_dict / safetensors.
+        self.register_buffer(
+            "_timestep_mask",
+            torch.ones(1, self.lora_dim, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _apply_timestep_mask(self, lx: torch.Tensor) -> torch.Tensor:
+        """Elementwise T-LoRA gate on the rank bottleneck (after lora_down).
+
+        ``_timestep_mask`` is ``(1, rank)``. Broadcast for Linear activations;
+        reshape for Conv2d/Conv3d where the rank axis is channel dim 1.
+        """
+        mask = self._timestep_mask
+        if lx.ndim == 4:
+            mask = mask.view(1, -1, 1, 1)
+        elif lx.ndim == 5:
+            mask = mask.view(1, -1, 1, 1, 1)
+        return lx * mask
+
     def _autocast_enabled_for(self, x):
         if not x.is_floating_point():
             return False
@@ -146,6 +168,8 @@ class LoRAModule(torch.nn.Module):
         lora_input = self._lora_input(x)
         if self.split_dims is None:
             lx = self.lora_down(lora_input)
+            # T-LoRA gate (identity when mask is all-ones / cleared)
+            lx = self._apply_timestep_mask(lx)
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -172,7 +196,7 @@ class LoRAModule(torch.nn.Module):
             # Add in the (possibly higher-precision) delta dtype, then round the sum once.
             return self._match_org_dtype(org_forwarded + lx * self.multiplier * scale, org_forwarded)
         else:
-            lxs = [lora_down(lora_input) for lora_down in self.lora_down]
+            lxs = [self._apply_timestep_mask(lora_down(lora_input)) for lora_down in self.lora_down]
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -182,9 +206,9 @@ class LoRAModule(torch.nn.Module):
             if self.rank_dropout is not None and self.training:
                 masks = [torch.rand((lx.size(0), self.lora_dim), device=lx.device) > self.rank_dropout for lx in lxs]
                 for i in range(len(lxs)):
-                    if len(lx.size()) == 3:
+                    if len(lxs[i].size()) == 3:
                         masks[i] = masks[i].unsqueeze(1)
-                    elif len(lx.size()) == 4:
+                    elif len(lxs[i].size()) == 4:
                         masks[i] = masks[i].unsqueeze(-1).unsqueeze(-1)
                     lxs[i] = lxs[i] * masks[i]
 
@@ -442,6 +466,17 @@ def create_network(
     if verbose is not None:
         verbose = True if verbose == "True" else False
 
+    # T-LoRA (timestep-dependent rank masking). Values arrive as strings from --network_args.
+    use_timestep_mask = kwargs.get("use_timestep_mask", None)
+    if use_timestep_mask is not None:
+        use_timestep_mask = str(use_timestep_mask).strip().lower() in ("1", "true", "yes", "on")
+    else:
+        use_timestep_mask = False
+    min_rank = kwargs.get("min_rank", None)
+    min_rank = int(min_rank) if min_rank is not None else 1
+    alpha_rank_scale = kwargs.get("alpha_rank_scale", None)
+    alpha_rank_scale = float(alpha_rank_scale) if alpha_rank_scale is not None else 1.0
+
     # regular expression for module selection: exclude and include
     exclude_patterns = kwargs.get("exclude_patterns", None)
     if exclude_patterns is not None and isinstance(exclude_patterns, str):
@@ -472,6 +507,9 @@ def create_network(
         exclude_patterns=exclude_patterns,
         include_patterns=include_patterns,
         verbose=verbose,
+        use_timestep_mask=use_timestep_mask,
+        min_rank=min_rank,
+        alpha_rank_scale=alpha_rank_scale,
     )
 
     loraplus_lr_ratio = kwargs.get("loraplus_lr_ratio", None)
@@ -510,6 +548,9 @@ class LoRANetwork(torch.nn.Module):
         exclude_patterns: Optional[List[str]] = None,
         include_patterns: Optional[List[str]] = None,
         verbose: Optional[bool] = False,
+        use_timestep_mask: bool = False,
+        min_rank: int = 1,
+        alpha_rank_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.multiplier = multiplier
@@ -524,6 +565,9 @@ class LoRANetwork(torch.nn.Module):
         self.target_replace_modules = target_replace_modules
         self.prefix = prefix
         self.module_kwargs = module_kwargs or {}
+        self.use_timestep_mask = bool(use_timestep_mask)
+        self.min_rank = int(min_rank)
+        self.alpha_rank_scale = float(alpha_rank_scale)
 
         self.loraplus_lr_ratio = None
         # self.loraplus_unet_lr_ratio = None
@@ -536,6 +580,10 @@ class LoRANetwork(torch.nn.Module):
             logger.info(
                 f"neuron dropout: p={self.dropout}, rank dropout: p={self.rank_dropout}, module dropout: p={self.module_dropout}"
             )
+            if self.use_timestep_mask:
+                logger.info(
+                    f"T-LoRA timestep mask enabled: min_rank={self.min_rank}, alpha_rank_scale={self.alpha_rank_scale}"
+                )
             # if self.conv_lora_dim is not None:
             #     logger.info(
             #         f"apply LoRA to Conv2d with kernel size (3,3). dim (rank): {self.conv_lora_dim}, alpha: {self.conv_alpha}"
@@ -836,6 +884,54 @@ class LoRANetwork(torch.nn.Module):
 
     def on_step_start(self):
         pass
+
+    def set_timestep_mask(self, timesteps: torch.Tensor, max_timestep: float = 1000.0):
+        """Compute and set T-LoRA's timestep-dependent rank mask on all modules.
+
+        Effective rank at diffusion timestep ``t`` (in ``[0, max_timestep]``)::
+
+            frac = ((max_t - t) / max_t).clamp(0, 1) ** alpha_rank_scale
+            r_eff = frac * (rank - min_rank) + min_rank
+
+        High noise (large ``t``) uses fewer rank components; low noise uses full rank.
+        Musubi's flow-matching timesteps are typically in ``[1, 1000]``, so the default
+        ``max_timestep`` is ``1000``. Saved weights remain standard Kohya LoRA — the
+        mask is training-only and never persisted.
+        """
+        if not self.use_timestep_mask:
+            return
+
+        # One shared mask per distinct module rank (supports mixed-rank networks).
+        masks = getattr(self, "_shared_timestep_masks", None)
+        if masks is None or any(m.device != timesteps.device for m in masks.values()):
+            masks = {}
+            self._timestep_mask_aranges = {}
+            for lora in self.text_encoder_loras + self.unet_loras:
+                rank = int(getattr(lora, "lora_dim", self.lora_dim))
+                if rank not in masks:
+                    masks[rank] = torch.zeros(1, rank, device=timesteps.device)
+                    self._timestep_mask_aranges[rank] = torch.arange(rank, device=timesteps.device)
+                lora._timestep_mask = masks[rank]
+            self._shared_timestep_masks = masks
+
+        t = timesteps.float().mean()
+        frac = ((max_timestep - t) / max_timestep).clamp(min=0.0, max=1.0)
+        frac = frac.pow(self.alpha_rank_scale)
+        for rank, mask in masks.items():
+            floor = min(float(self.min_rank), float(rank))
+            r = (frac * (rank - floor) + floor).clamp(max=float(rank))
+            mask.copy_((self._timestep_mask_aranges[rank] < r).to(mask.dtype).unsqueeze(0))
+
+    def clear_timestep_mask(self):
+        """Restore full-rank (all-ones) masks for sampling / inference.
+
+        Safe to call even when ``set_timestep_mask`` has never run. Keeps the
+        always-a-Tensor invariant so the forward path needs no None guard.
+        """
+        for shared in (getattr(self, "_shared_timestep_masks", None) or {}).values():
+            shared.fill_(1.0)
+        # Modules that still hold their local default buffer (never rebound)
+        # are already ones; nothing else to do.
 
     def get_trainable_params(self):
         return self.parameters()
